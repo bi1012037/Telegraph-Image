@@ -23,11 +23,10 @@ export async function onRequest(context) {
         console.log(filePath)
         fileUrl = `https://api.telegram.org/file/bot${env.TG_Bot_Token}/${filePath}`;
     }
-    const newHeaders = new Headers(response.headers);
-    newHeaders.set('Content-Disposition', 'inline');
+
     const response = await fetch(fileUrl, {
         method: request.method,
-        headers: newHeaders,
+        headers: request.headers,
         body: request.body,
     });
 
@@ -40,13 +39,13 @@ export async function onRequest(context) {
     // Allow the admin page to directly view the image
     const isAdmin = request.headers.get('Referer')?.includes(`${url.origin}/admin`);
     if (isAdmin) {
-        return response;
+        return await withInlineDisposition(response);
     }
 
     // Check if KV storage is available
     if (!env.img_url) {
         console.log("KV storage not available, returning image directly");
-        return response;  // Directly return image response, terminate execution
+        return await withInlineDisposition(response);  // Directly return image response, terminate execution
     }
 
     // The following code executes only if KV is available
@@ -78,7 +77,7 @@ export async function onRequest(context) {
 
     // Handle based on ListType and Label
     if (metadata.ListType === "White") {
-        return response;
+        return await withInlineDisposition(response);
     } else if (metadata.ListType === "Block" || metadata.Label === "adult") {
         const referer = request.headers.get('Referer');
         const redirectUrl = referer ? "https://static-res.pages.dev/teleimage/img-block-compressed.png" : `${url.origin}/block-img.html`;
@@ -125,9 +124,18 @@ export async function onRequest(context) {
     await env.img_url.put(params.id, "", { metadata });
 
     // Return file content
-    return response;
+    return await withInlineDisposition(response);
 }
-
+//加入 helper function：加上 Content-Disposition: inline header
+async function withInlineDisposition(response) {
+    const headers = new Headers(response.headers);
+    headers.set('Content-Disposition', 'inline');
+    return new Response(await response.arrayBuffer(), {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+    });
+}
 async function getFilePath(env, file_id) {
     try {
         const url = `https://api.telegram.org/bot${env.TG_Bot_Token}/getFile?file_id=${file_id}`;
