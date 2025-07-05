@@ -6,22 +6,20 @@ export async function onRequest(context) {
     } = context;
 
     const url = new URL(request.url);
-    let fileUrl = 'https://telegra.ph/' + url.pathname + url.search
-    if (url.pathname.length > 39) { // Path length > 39 indicates file uploaded via Telegram Bot API
-        const formdata = new FormData();
-        formdata.append("file_id", url.pathname);
+    let fileUrl = 'https://telegra.ph' + url.pathname + url.search;
+    let filePathForMime = fileUrl; // 預設用來猜 MIME 類型
 
-        const requestOptions = {
-            method: "POST",
-            body: formdata,
-            redirect: "follow"
-        };
-        // /file/AgACAgEAAxkDAAMDZt1Gzs4W8dQPWiQJxO5YSH5X-gsAAt-sMRuWNelGOSaEM_9lHHgBAAMCAANtAAM2BA.png
-        //get the AgACAgEAAxkDAAMDZt1Gzs4W8dQPWiQJxO5YSH5X-gsAAt-sMRuWNelGOSaEM_9lHHgBAAMCAANtAAM2BA
-        console.log(url.pathname.split(".")[0].split("/")[2])
-        const filePath = await getFilePath(env, url.pathname.split(".")[0].split("/")[2]);
-        console.log(filePath)
+    if (url.pathname.length > 39) {
+        const fileId = url.pathname.split(".")[0].split("/")[2];
+        console.log(fileId);
+
+        const filePath = await getFilePath(env, fileId);
+        console.log(filePath);
+
+        if (!filePath) return new Response("Failed to get Telegram file", { status: 500 });
+
         fileUrl = `https://api.telegram.org/file/bot${env.TG_Bot_Token}/${filePath}`;
+        filePathForMime = filePath; // 使用 Telegram 的真實 file path 猜 MIME
     }
 
     const response = await fetch(fileUrl, {
@@ -30,28 +28,20 @@ export async function onRequest(context) {
         body: request.body,
     });
 
-    // If the response is OK, proceed with further checks
     if (!response.ok) return response;
 
-    // Log response details
-    console.log(response.ok, response.status);
-
-    // Allow the admin page to directly view the image
     const isAdmin = request.headers.get('Referer')?.includes(`${url.origin}/admin`);
     if (isAdmin) {
-        return await withInlineDisposition(response);
+        return await withInlineDisposition(response, filePathForMime);
     }
 
-    // Check if KV storage is available
     if (!env.img_url) {
         console.log("KV storage not available, returning image directly");
-        return await withInlineDisposition(response);  // Directly return image response, terminate execution
+        return await withInlineDisposition(response, filePathForMime);
     }
 
-    // The following code executes only if KV is available
     let record = await env.img_url.getWithMetadata(params.id);
     if (!record || !record.metadata) {
-        // Initialize metadata if it doesn't exist
         console.log("Metadata not found, initializing...");
         record = {
             metadata: {
@@ -75,88 +65,91 @@ export async function onRequest(context) {
         fileSize: record.metadata.fileSize || 0,
     };
 
-    // Handle based on ListType and Label
     if (metadata.ListType === "White") {
-        return await withInlineDisposition(response);
+        return await withInlineDisposition(response, filePathForMime);
     } else if (metadata.ListType === "Block" || metadata.Label === "adult") {
         const referer = request.headers.get('Referer');
-        const redirectUrl = referer ? "https://static-res.pages.dev/teleimage/img-block-compressed.png" : `${url.origin}/block-img.html`;
+        const redirectUrl = referer
+            ? "https://static-res.pages.dev/teleimage/img-block-compressed.png"
+            : `${url.origin}/block-img.html`;
         return Response.redirect(redirectUrl, 302);
     }
 
-    // Check if WhiteList_Mode is enabled
     if (env.WhiteList_Mode === "true") {
         return Response.redirect(`${url.origin}/whitelist-on.html`, 302);
     }
 
-    // If no metadata or further actions required, moderate content and add to KV if needed
     if (env.ModerateContentApiKey) {
         try {
             console.log("Starting content moderation...");
-            const moderateUrl = `https://api.moderatecontent.com/moderate/?key=${env.ModerateContentApiKey}&url=https://telegra.ph${url.pathname}${url.search}`;
+            const moderateUrl = `https://api.moderatecontent.com/moderate/?key=${env.ModerateContentApiKey}&url=${fileUrl}`;
             const moderateResponse = await fetch(moderateUrl);
 
-            if (!moderateResponse.ok) {
-                console.error("Content moderation API request failed: " + moderateResponse.status);
-            } else {
+            if (moderateResponse.ok) {
                 const moderateData = await moderateResponse.json();
                 console.log("Content moderation results:", moderateData);
 
-                if (moderateData && moderateData.rating_label) {
+                if (moderateData?.rating_label) {
                     metadata.Label = moderateData.rating_label;
 
                     if (moderateData.rating_label === "adult") {
-                        console.log("Content marked as adult, saving metadata and redirecting");
                         await env.img_url.put(params.id, "", { metadata });
                         return Response.redirect(`${url.origin}/block-img.html`, 302);
                     }
                 }
+            } else {
+                console.error("Moderation API failed", moderateResponse.status);
             }
-        } catch (error) {
-            console.error("Error during content moderation: " + error.message);
-            // Moderation failure should not affect user experience, continue processing
+        } catch (err) {
+            console.error("Moderation error:", err.message);
         }
     }
 
-    // Only save metadata if content is not adult content
-    // Adult content cases are already handled above and will not reach this point
-    console.log("Saving metadata");
     await env.img_url.put(params.id, "", { metadata });
 
-    // Return file content
-    return await withInlineDisposition(response);
+    return await withInlineDisposition(response, filePathForMime);
 }
-//加入 helper function：加上 Content-Disposition: inline header
-async function withInlineDisposition(response) {
+
+// 自動推測 Content-Type
+function guessMimeType(filePath = "") {
+    if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) return "image/jpeg";
+    if (filePath.endsWith(".png")) return "image/png";
+    if (filePath.endsWith(".gif")) return "image/gif";
+    if (filePath.endsWith(".webp")) return "image/webp";
+    return "application/octet-stream";
+}
+
+// 強制 inline 顯示 + 修正 Content-Type
+async function withInlineDisposition(response, filePath = "") {
     const headers = new Headers(response.headers);
-    headers.set('Content-Disposition', 'inline');
+    headers.set("Content-Disposition", "inline");
+
+    // 若 Telegram 回傳錯的 Content-Type，修正為正確類型
+    const currentType = headers.get("Content-Type");
+    if (!currentType || currentType === "application/octet-stream") {
+        headers.set("Content-Type", guessMimeType(filePath));
+    }
+
     return new Response(await response.arrayBuffer(), {
         status: response.status,
         statusText: response.statusText,
         headers,
     });
 }
+
+// Telegram API: 取得檔案路徑
 async function getFilePath(env, file_id) {
     try {
         const url = `https://api.telegram.org/bot${env.TG_Bot_Token}/getFile?file_id=${file_id}`;
-        const res = await fetch(url, {
-            method: 'GET',
-        });
+        const res = await fetch(url);
 
         if (!res.ok) {
             console.error(`HTTP error! status: ${res.status}`);
             return null;
         }
 
-        const responseData = await res.json();
-        const { ok, result } = responseData;
-
-        if (ok && result) {
-            return result.file_path;
-        } else {
-            console.error('Error in response data:', responseData);
-            return null;
-        }
+        const json = await res.json();
+        return json.ok && json.result ? json.result.file_path : null;
     } catch (error) {
         console.error('Error fetching file path:', error.message);
         return null;
