@@ -23,10 +23,11 @@ export async function onRequest(context) {
         console.log(filePath)
         fileUrl = `https://api.telegram.org/file/bot${env.TG_Bot_Token}/${filePath}`;
     }
-
+    const newHeaders = new Headers(response.headers);
+    newHeaders.set('Content-Disposition', 'inline');
     const response = await fetch(fileUrl, {
         method: request.method,
-        headers: request.headers,
+        headers: newHeaders,
         body: request.body,
     });
 
