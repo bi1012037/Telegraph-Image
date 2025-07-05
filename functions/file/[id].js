@@ -1,9 +1,5 @@
 export async function onRequest(context) {
-    const {
-        request,
-        env,
-        params,
-    } = context;
+    const { request, env, params } = context;
 
     const url = new URL(request.url);
     let fileUrl = 'https://telegra.ph' + url.pathname + url.search;
@@ -62,7 +58,7 @@ export async function onRequest(context) {
         fileSize: record.metadata.fileSize || 0,
     };
 
-    // 阻擋名單處理
+    // 黑名單處理
     if (metadata.ListType === "White") {
         return await withInlineDisposition(response, filePathForMime);
     } else if (metadata.ListType === "Block" || metadata.Label === "adult") {
@@ -105,19 +101,18 @@ export async function onRequest(context) {
     return await withInlineDisposition(response, filePathForMime);
 }
 
-// 強制 inline 並修正 Content-Type
+// ========= 🔧 Helper: 加入 inline 並修正 Content-Type =========
 async function withInlineDisposition(response, filePath = "") {
-    const headers = new Headers();
+    const headers = new Headers(response.headers); // ✅ 保留原始 headers
 
-    // 正確 Content-Type（避免 Telegram 回傳 octet-stream）
-    headers.set("Content-Type", guessMimeType(filePath));
+    // 修正 Content-Type（避免 octet-stream 造成下載）
+    const currentType = headers.get("Content-Type");
+    if (!currentType || currentType === "application/octet-stream") {
+        headers.set("Content-Type", guessMimeType(filePath));
+    }
 
-    // 強制顯示而不是下載
+    // 強制瀏覽器用 inline 顯示
     headers.set("Content-Disposition", "inline");
-
-    // 若原始檔案有長度，也補上
-    const contentLength = response.headers.get("Content-Length");
-    if (contentLength) headers.set("Content-Length", contentLength);
 
     return new Response(await response.arrayBuffer(), {
         status: response.status,
@@ -126,7 +121,7 @@ async function withInlineDisposition(response, filePath = "") {
     });
 }
 
-// 根據副檔名推測 MIME 類型
+// ========= 🔧 Helper: 推測 MIME 類型 =========
 function guessMimeType(filePath = "") {
     filePath = filePath.toLowerCase();
     if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) return "image/jpeg";
@@ -140,16 +135,12 @@ function guessMimeType(filePath = "") {
     return "application/octet-stream";
 }
 
-// Telegram API 取得檔案路徑
+// ========= 🔧 Helper: 取得 Telegram 檔案路徑 =========
 async function getFilePath(env, file_id) {
     try {
         const url = `https://api.telegram.org/bot${env.TG_Bot_Token}/getFile?file_id=${file_id}`;
         const res = await fetch(url);
-
-        if (!res.ok) {
-            console.error(`getFile failed with status: ${res.status}`);
-            return null;
-        }
+        if (!res.ok) return null;
 
         const json = await res.json();
         return json.ok && json.result ? json.result.file_path : null;
