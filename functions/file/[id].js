@@ -7,19 +7,16 @@ export async function onRequest(context) {
 
     const url = new URL(request.url);
     let fileUrl = 'https://telegra.ph' + url.pathname + url.search;
-    let filePathForMime = fileUrl; // 預設用來猜 MIME 類型
+    let filePathForMime = fileUrl;
 
+    // 若是 Telegram Bot API 上傳的圖片
     if (url.pathname.length > 39) {
         const fileId = url.pathname.split(".")[0].split("/")[2];
-        console.log(fileId);
-
         const filePath = await getFilePath(env, fileId);
-        console.log(filePath);
-
         if (!filePath) return new Response("Failed to get Telegram file", { status: 500 });
 
         fileUrl = `https://api.telegram.org/file/bot${env.TG_Bot_Token}/${filePath}`;
-        filePathForMime = filePath; // 使用 Telegram 的真實 file path 猜 MIME
+        filePathForMime = filePath;
     }
 
     const response = await fetch(fileUrl, {
@@ -35,14 +32,14 @@ export async function onRequest(context) {
         return await withInlineDisposition(response, filePathForMime);
     }
 
+    // 沒有 KV，直接回應圖片
     if (!env.img_url) {
-        console.log("KV storage not available, returning image directly");
         return await withInlineDisposition(response, filePathForMime);
     }
 
+    // 取得或初始化 metadata
     let record = await env.img_url.getWithMetadata(params.id);
     if (!record || !record.metadata) {
-        console.log("Metadata not found, initializing...");
         record = {
             metadata: {
                 ListType: "None",
@@ -65,6 +62,7 @@ export async function onRequest(context) {
         fileSize: record.metadata.fileSize || 0,
     };
 
+    // 阻擋名單處理
     if (metadata.ListType === "White") {
         return await withInlineDisposition(response, filePathForMime);
     } else if (metadata.ListType === "Block" || metadata.Label === "adult") {
@@ -75,20 +73,19 @@ export async function onRequest(context) {
         return Response.redirect(redirectUrl, 302);
     }
 
+    // 若啟動白名單模式
     if (env.WhiteList_Mode === "true") {
         return Response.redirect(`${url.origin}/whitelist-on.html`, 302);
     }
 
+    // 自動內容分類
     if (env.ModerateContentApiKey) {
         try {
-            console.log("Starting content moderation...");
             const moderateUrl = `https://api.moderatecontent.com/moderate/?key=${env.ModerateContentApiKey}&url=${fileUrl}`;
             const moderateResponse = await fetch(moderateUrl);
 
             if (moderateResponse.ok) {
                 const moderateData = await moderateResponse.json();
-                console.log("Content moderation results:", moderateData);
-
                 if (moderateData?.rating_label) {
                     metadata.Label = moderateData.rating_label;
 
@@ -97,8 +94,6 @@ export async function onRequest(context) {
                         return Response.redirect(`${url.origin}/block-img.html`, 302);
                     }
                 }
-            } else {
-                console.error("Moderation API failed", moderateResponse.status);
             }
         } catch (err) {
             console.error("Moderation error:", err.message);
@@ -110,25 +105,19 @@ export async function onRequest(context) {
     return await withInlineDisposition(response, filePathForMime);
 }
 
-// 自動推測 Content-Type
-function guessMimeType(filePath = "") {
-    if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) return "image/jpeg";
-    if (filePath.endsWith(".png")) return "image/png";
-    if (filePath.endsWith(".gif")) return "image/gif";
-    if (filePath.endsWith(".webp")) return "image/webp";
-    return "application/octet-stream";
-}
-
-// 強制 inline 顯示 + 修正 Content-Type
+// 強制 inline 並修正 Content-Type
 async function withInlineDisposition(response, filePath = "") {
-    const headers = new Headers(response.headers);
+    const headers = new Headers();
+
+    // 正確 Content-Type（避免 Telegram 回傳 octet-stream）
+    headers.set("Content-Type", guessMimeType(filePath));
+
+    // 強制顯示而不是下載
     headers.set("Content-Disposition", "inline");
 
-    // 若 Telegram 回傳錯的 Content-Type，修正為正確類型
-    const currentType = headers.get("Content-Type");
-    if (!currentType || currentType === "application/octet-stream") {
-        headers.set("Content-Type", guessMimeType(filePath));
-    }
+    // 若原始檔案有長度，也補上
+    const contentLength = response.headers.get("Content-Length");
+    if (contentLength) headers.set("Content-Length", contentLength);
 
     return new Response(await response.arrayBuffer(), {
         status: response.status,
@@ -137,21 +126,35 @@ async function withInlineDisposition(response, filePath = "") {
     });
 }
 
-// Telegram API: 取得檔案路徑
+// 根據副檔名推測 MIME 類型
+function guessMimeType(filePath = "") {
+    filePath = filePath.toLowerCase();
+    if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) return "image/jpeg";
+    if (filePath.endsWith(".png")) return "image/png";
+    if (filePath.endsWith(".gif")) return "image/gif";
+    if (filePath.endsWith(".webp")) return "image/webp";
+    if (filePath.endsWith(".bmp")) return "image/bmp";
+    if (filePath.endsWith(".ico")) return "image/x-icon";
+    if (filePath.endsWith(".svg")) return "image/svg+xml";
+    if (filePath.endsWith(".tif") || filePath.endsWith(".tiff")) return "image/tiff";
+    return "application/octet-stream";
+}
+
+// Telegram API 取得檔案路徑
 async function getFilePath(env, file_id) {
     try {
         const url = `https://api.telegram.org/bot${env.TG_Bot_Token}/getFile?file_id=${file_id}`;
         const res = await fetch(url);
 
         if (!res.ok) {
-            console.error(`HTTP error! status: ${res.status}`);
+            console.error(`getFile failed with status: ${res.status}`);
             return null;
         }
 
         const json = await res.json();
         return json.ok && json.result ? json.result.file_path : null;
     } catch (error) {
-        console.error('Error fetching file path:', error.message);
+        console.error('Error fetching Telegram file path:', error.message);
         return null;
     }
 }
