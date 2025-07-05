@@ -132,6 +132,10 @@ function guessMimeType(filePath = "") {
     if (filePath.endsWith(".ico")) return "image/x-icon";
     if (filePath.endsWith(".svg")) return "image/svg+xml";
     if (filePath.endsWith(".tif") || filePath.endsWith(".tiff")) return "image/tiff";
+    //嘗試新增mp3、mp4、pdf
+    if (filePath.endsWith(".mp3")) return "audio/mpeg";
+    if (filePath.endsWith(".pdf")) return "application/pdf";
+    if (filePath.endsWith(".mp4")) return "video/mp4";
     return "application/octet-stream";
 }
 
